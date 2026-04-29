@@ -516,9 +516,13 @@ function parseDetailRows(text, base) {
     if (/Serial\/Lot|Inventory Detail|Expiration Date|Status|Bin/i.test(line)) continue;
 
     const tokens = line.split(/\s+/);
+
+    // LP can be in the middle of the line, example:
+    // 08202025   R38233   OK   8/20/2026   463
     const lpnIndex = tokens.findIndex(t => /^R\d{3,}$/i.test(t));
     if (lpnIndex < 0) continue;
 
+    // Quantity is normally the last value on the inventory detail row.
     const qtyMatch = line.match(/([+-]?\s*\d[\d,]*(?:\.\d+)?)\s*$/);
     if (!qtyMatch) continue;
 
@@ -538,14 +542,14 @@ function parseText(text) {
   const r = { item:'', qty:'', units:'', lpn:'', lot:'', detailRows: [] };
   if (!text.trim()) return r;
 
-  // Detecta items numericos y mixtos: 40863-V3, 40105-V2, 20001-REWORK, etc.
-  const itemM = text.match(/(?:^|\n)\s*Item\s*#?\s*([A-Z0-9]+(?:-[A-Z0-9]+)*)/i);
+  // Accepts numeric items and mixed item codes such as 40863-V3, 40105-V2, 20001-REWORK.
+  const itemM = text.match(/(?:^|\n)\s*Item\s*#?\s*\n?\s*([A-Z0-9]+(?:-[A-Z0-9]+)*)/i);
   if (itemM) r.item = normalizeItemCode(itemM[1]);
 
-  const qtyM = text.match(/(?:^|\n)\s*Quantity\s*([+-]?\s*\d[\d,]*(?:\.\d+)?)/i);
+  const qtyM = text.match(/(?:^|\n)\s*Quantity\s*\n?\s*([+-]?\s*\d[\d,]*(?:\.\d+)?)/i);
   if (qtyM) r.qty = normalizeQtyText(qtyM[1]);
 
-  const unitsM = text.match(/(?:^|\n)\s*Units?\s*([A-Za-z]+)/i);
+  const unitsM = text.match(/(?:^|\n)\s*Units?\s*\n?\s*([A-Za-z]+)/i);
   if (unitsM) {
     const u = unitsM[1].toLowerCase();
     r.units = u === 'pound' ? 'lb' : u === 'gallon' ? 'gal' : u === 'each' ? 'each' : unitsM[1];
@@ -553,20 +557,23 @@ function parseText(text) {
 
   r.detailRows = parseDetailRows(text, r);
 
-  // Si Inventory Detail tiene varios LP, usa el primero como preview/fallback.
+  // If Inventory Detail has LP rows, use the first row for preview/manual fallback.
   if (r.detailRows.length) {
     r.lpn = r.detailRows[0].lpn;
     r.lot = r.detailRows[0].lot;
+    // Use detail-row quantity when there is no header qty.
     if (!r.qty) r.qty = r.detailRows[0].qty;
   } else {
+    // Fallback: find an LP anywhere in the text.
     const lpnM = text.match(/\b(R\d{3,})\b/i);
     if (lpnM) r.lpn = lpnM[1].toUpperCase();
 
+    // Fallback lot: value before LP.
     const lotM = text.match(/([A-Z0-9-]{4,})\s+(?:[A-Z0-9]+\s+)?R\d{3,}/i);
     if (lotM) r.lot = lotM[1];
   }
 
-  // Fallback: ultimo numero valido en una linea de detalle.
+  // Fallback: last number on a detail line.
   if (!r.qty) {
     const lines = text.split(/\r?\n/);
     for (const l of lines.reverse()) {
@@ -608,7 +615,7 @@ function parseAndAdd() {
   const manualLpn  = document.getElementById('manualLpn')?.value.trim() || '';
 
   // For Adjustment/Scrap: if IMS detail has more than one LP, create one table row per LP.
-  if ((type === 'adj' || type === 'scrap') && p.detailRows && p.detailRows.length > 1 && !manualLpn) {
+  if ((type === 'adj' || type === 'scrap') && p.detailRows && p.detailRows.length > 0 && !manualLpn) {
     const item = manualItem || p.item;
     if (!item) { showToast('⚠️ No item detected. Check the text.'); return; }
     p.detailRows.forEach(row => {
