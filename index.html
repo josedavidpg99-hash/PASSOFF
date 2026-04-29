@@ -499,7 +499,7 @@ function clearManualFields() {
 
 // ── Parser ─────────────────────────────────────────────
 function normalizeQtyText(v) {
-  return String(v || '').replace(/s+/g, '').trim();
+  return String(v || '').replace(/\s+/g, '').trim();
 }
 
 function normalizeItemCode(v) {
@@ -508,20 +508,18 @@ function normalizeItemCode(v) {
 
 function parseDetailRows(text, base) {
   const rows = [];
-  const lines = text.split(/
-?
-/);
+  const lines = text.split(/\r?\n/);
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line) continue;
-    if (/Serial/Lot|Inventory Detail|Expiration Date|Status|Bin/i.test(line)) continue;
+    if (/Serial\/Lot|Inventory Detail|Expiration Date|Status|Bin/i.test(line)) continue;
 
-    const tokens = line.split(/s+/);
-    const lpnIndex = tokens.findIndex(t => /^Rd{3,}$/i.test(t));
+    const tokens = line.split(/\s+/);
+    const lpnIndex = tokens.findIndex(t => /^R\d{3,}$/i.test(t));
     if (lpnIndex < 0) continue;
 
-    const qtyMatch = line.match(/([+-]?s*d[d,]*(?:.d+)?)s*$/);
+    const qtyMatch = line.match(/([+-]?\s*\d[\d,]*(?:\.\d+)?)\s*$/);
     if (!qtyMatch) continue;
 
     rows.push({
@@ -540,17 +538,14 @@ function parseText(text) {
   const r = { item:'', qty:'', units:'', lpn:'', lot:'', detailRows: [] };
   if (!text.trim()) return r;
 
-  // Accepts numeric items and mixed item codes such as 40863-V3, 40105-V2, 20001-REWORK.
-  const itemM = text.match(/(?:^|
-)s*Items*#?s*([A-Z0-9]+(?:-[A-Z0-9]+)*)/i);
+  // Detecta items numericos y mixtos: 40863-V3, 40105-V2, 20001-REWORK, etc.
+  const itemM = text.match(/(?:^|\n)\s*Item\s*#?\s*([A-Z0-9]+(?:-[A-Z0-9]+)*)/i);
   if (itemM) r.item = normalizeItemCode(itemM[1]);
 
-  const qtyM = text.match(/(?:^|
-)s*Quantitys*([+-]?s*d[d,]*(?:.d+)?)/i);
+  const qtyM = text.match(/(?:^|\n)\s*Quantity\s*([+-]?\s*\d[\d,]*(?:\.\d+)?)/i);
   if (qtyM) r.qty = normalizeQtyText(qtyM[1]);
 
-  const unitsM = text.match(/(?:^|
-)s*Units?s*([A-Za-z]+)/i);
+  const unitsM = text.match(/(?:^|\n)\s*Units?\s*([A-Za-z]+)/i);
   if (unitsM) {
     const u = unitsM[1].toLowerCase();
     r.units = u === 'pound' ? 'lb' : u === 'gallon' ? 'gal' : u === 'each' ? 'each' : unitsM[1];
@@ -558,27 +553,28 @@ function parseText(text) {
 
   r.detailRows = parseDetailRows(text, r);
 
-  // If Inventory Detail has multiple LP rows, use the first row for preview/manual fallback.
+  // Si Inventory Detail tiene varios LP, usa el primero como preview/fallback.
   if (r.detailRows.length) {
     r.lpn = r.detailRows[0].lpn;
     r.lot = r.detailRows[0].lot;
     if (!r.qty) r.qty = r.detailRows[0].qty;
   } else {
-    const lpnM = text.match(/(Rd{3,})/i);
+    const lpnM = text.match(/\b(R\d{3,})\b/i);
     if (lpnM) r.lpn = lpnM[1].toUpperCase();
 
-    const lotM = text.match(/([A-Z0-9-]{4,})s+(?:[A-Z0-9]+s+)?Rd{3,}/i);
+    const lotM = text.match(/([A-Z0-9-]{4,})\s+(?:[A-Z0-9]+\s+)?R\d{3,}/i);
     if (lotM) r.lot = lotM[1];
   }
 
-  // Fallback: last number on a detail line.
+  // Fallback: ultimo numero valido en una linea de detalle.
   if (!r.qty) {
-    const lines = text.split(/
-?
-/);
+    const lines = text.split(/\r?\n/);
     for (const l of lines.reverse()) {
-      const m = l.match(/([+-]?s*d[d,]*(?:.d+)?)s*$/);
-      if (m && Math.abs(parseFloat(normalizeQtyText(m[1]).replace(/,/g,''))) > 0) { r.qty = normalizeQtyText(m[1]); break; }
+      const m = l.match(/([+-]?\s*\d[\d,]*(?:\.\d+)?)\s*$/);
+      if (m && Math.abs(parseFloat(normalizeQtyText(m[1]).replace(/,/g,''))) > 0) {
+        r.qty = normalizeQtyText(m[1]);
+        break;
+      }
     }
   }
 
