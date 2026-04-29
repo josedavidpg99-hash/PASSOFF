@@ -498,37 +498,89 @@ function clearManualFields() {
 }
 
 // ── Parser ─────────────────────────────────────────────
-function parseText(text) {
-  const r = { item:'', qty:'', units:'', lpn:'', lot:'' };
-  if (!text.trim()) return r;
+function normalizeQtyText(v) {
+  return String(v || '').replace(/s+/g, '').trim();
+}
 
-  const itemM = text.match(/[Ii]tem\s*#?\s*(\d+)/);
-  if (itemM) r.item = itemM[1];
+function normalizeItemCode(v) {
+  return String(v || '').trim().toUpperCase();
+}
 
-  const qtyM = text.match(/[Qq]uantity\s*([+-]?\d+\.?\d*)/);
-  if (qtyM) r.qty = qtyM[1];
+function parseDetailRows(text, base) {
+  const rows = [];
+  const lines = text.split(/
+?
+/);
 
-  // Also try last number on a detail line as fallback qty
-  if (!r.qty) {
-    const lines = text.split('\n');
-    for (const l of lines.reverse()) {
-      const m = l.match(/([+-]?\d+\.?\d+)\s*$/);
-      if (m && Math.abs(parseFloat(m[1])) > 0) { r.qty = m[1]; break; }
-    }
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (/Serial/Lot|Inventory Detail|Expiration Date|Status|Bin/i.test(line)) continue;
+
+    const tokens = line.split(/s+/);
+    const lpnIndex = tokens.findIndex(t => /^Rd{3,}$/i.test(t));
+    if (lpnIndex < 0) continue;
+
+    const qtyMatch = line.match(/([+-]?s*d[d,]*(?:.d+)?)s*$/);
+    if (!qtyMatch) continue;
+
+    rows.push({
+      item: base.item,
+      qty: normalizeQtyText(qtyMatch[1]),
+      units: base.units,
+      lpn: tokens[lpnIndex].toUpperCase(),
+      lot: lpnIndex > 0 ? tokens[lpnIndex - 1] : ''
+    });
   }
 
-  const unitsM = text.match(/[Uu]nits?\s*([A-Za-z]+)/);
+  return rows;
+}
+
+function parseText(text) {
+  const r = { item:'', qty:'', units:'', lpn:'', lot:'', detailRows: [] };
+  if (!text.trim()) return r;
+
+  // Accepts numeric items and mixed item codes such as 40863-V3, 40105-V2, 20001-REWORK.
+  const itemM = text.match(/(?:^|
+)s*Items*#?s*([A-Z0-9]+(?:-[A-Z0-9]+)*)/i);
+  if (itemM) r.item = normalizeItemCode(itemM[1]);
+
+  const qtyM = text.match(/(?:^|
+)s*Quantitys*([+-]?s*d[d,]*(?:.d+)?)/i);
+  if (qtyM) r.qty = normalizeQtyText(qtyM[1]);
+
+  const unitsM = text.match(/(?:^|
+)s*Units?s*([A-Za-z]+)/i);
   if (unitsM) {
     const u = unitsM[1].toLowerCase();
     r.units = u === 'pound' ? 'lb' : u === 'gallon' ? 'gal' : u === 'each' ? 'each' : unitsM[1];
   }
 
-  const lpnM = text.match(/\b(R\d{5,7})\b/);
-  if (lpnM) r.lpn = lpnM[1];
+  r.detailRows = parseDetailRows(text, r);
 
-  // Lot: long alphanum before LPN
-  const lotM = text.match(/([A-Z0-9]{6,14})\s+(?:[A-Z0-9]+\s+)?R\d{5,7}/);
-  if (lotM) r.lot = lotM[1];
+  // If Inventory Detail has multiple LP rows, use the first row for preview/manual fallback.
+  if (r.detailRows.length) {
+    r.lpn = r.detailRows[0].lpn;
+    r.lot = r.detailRows[0].lot;
+    if (!r.qty) r.qty = r.detailRows[0].qty;
+  } else {
+    const lpnM = text.match(/(Rd{3,})/i);
+    if (lpnM) r.lpn = lpnM[1].toUpperCase();
+
+    const lotM = text.match(/([A-Z0-9-]{4,})s+(?:[A-Z0-9]+s+)?Rd{3,}/i);
+    if (lotM) r.lot = lotM[1];
+  }
+
+  // Fallback: last number on a detail line.
+  if (!r.qty) {
+    const lines = text.split(/
+?
+/);
+    for (const l of lines.reverse()) {
+      const m = l.match(/([+-]?s*d[d,]*(?:.d+)?)s*$/);
+      if (m && Math.abs(parseFloat(normalizeQtyText(m[1]).replace(/,/g,''))) > 0) { r.qty = normalizeQtyText(m[1]); break; }
+    }
+  }
 
   return r;
 }
@@ -558,7 +610,29 @@ function parseAndAdd() {
   const p = parseText(text);
   const manualItem = document.getElementById('manualItem')?.value.trim() || '';
   const manualLpn  = document.getElementById('manualLpn')?.value.trim() || '';
+
+  // For Adjustment/Scrap: if IMS detail has more than one LP, create one table row per LP.
+  if ((type === 'adj' || type === 'scrap') && p.detailRows && p.detailRows.length > 1 && !manualLpn) {
+    const item = manualItem || p.item;
+    if (!item) { showToast('⚠️ No item detected. Check the text.'); return; }
+    p.detailRows.forEach(row => {
+      data[type].push({ ...row, item, reason });
+    });
+    renderTable(type);
+    updateCounts();
+    document.getElementById('pasteInput').value = '';
+    document.getElementById('previewBox').style.display = 'none';
+    const fl = document.getElementById('successFlash');
+    fl.style.display = 'block'; fl.style.animation = 'none';
+    setTimeout(() => { fl.style.animation = 'fadeOut 2.5s forwards'; }, 10);
+    setTimeout(() => { fl.style.display = 'none'; }, 2600);
+    if (type !== activeTab) showTab(type);
+    showToast('✅ Added ' + p.detailRows.length + ' LP rows.');
+    return;
+  }
+
   const entry = { ...p, item: manualItem || p.item, lpn: manualLpn || p.lpn, reason };
+  delete entry.detailRows;
 
   if (type === 'mov') {
     entry.prev = document.getElementById('movPrev').value.trim();
@@ -585,7 +659,6 @@ function parseAndAdd() {
   setTimeout(() => { fl.style.display = 'none'; }, 2600);
   if (type !== activeTab) showTab(type);
 }
-
 // ── Render Tables ──────────────────────────────────────
 function emptyRow(cols, icon, label) {
   return `<tr><td colspan="${cols}"><div class="empty"><div class="empty-icon">${icon}</div>${label}</div></td></tr>`;
